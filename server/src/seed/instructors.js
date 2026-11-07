@@ -5,7 +5,7 @@ import { connectDB } from '../config/db.js';
 import { Instructor } from '../models/Instructor.js';
 
 // Seed data for the Instructor Portal NoSQL injection lab.
-// Passwords are plaintext ON PURPOSE (see Instructor model / Flow.md).
+// Demo credentials are hashed by the model's save hook.
 const instructors = [
   {
     name: 'Prof. Alice Smith',
@@ -49,8 +49,12 @@ const instructors = [
 
 async function run() {
   await connectDB();
-  await Instructor.deleteMany({});
-  const created = await Instructor.insertMany(instructors);
+  const created = [];
+  for (const instructor of instructors) {
+    if (!await Instructor.exists({ username: instructor.username })) {
+      created.push(await Instructor.create(instructor));
+    }
+  }
   console.log(`Seeded ${created.length} instructor(s):`);
   for (const i of created) {
     console.log(`  - ${i.username} (${i.role})`);
@@ -61,6 +65,6 @@ async function run() {
 }
 
 run().catch((err) => {
-  console.error('Seed failed:', err);
+  console.error('Seed failed; check database availability and account configuration.');
   process.exit(1);
 });

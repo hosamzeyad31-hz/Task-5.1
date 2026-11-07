@@ -1,14 +1,9 @@
 // Shared test environment for the Instructor Portal security suite.
 //
-// Spins up a throwaway in-memory MongoDB (a REAL mongod, so server-side
-// operators like $regex and $where genuinely execute) and seeds it with the
-// same accounts as src/seed/instructors.js.
+// Spins up a throwaway MongoDB and seeds test-only accounts. Attack payloads
+// must be rejected by the application before any database query executes.
 //
-// Seeding goes through Instructor.create(), so whatever hooks the project's own
-// model defines run naturally:
-//   - vulnerable project  -> no hook, password stored in plaintext
-//   - solution project    -> pre('save') bcrypt hash
-// The suite therefore exercises each project's real behavior with identical code.
+// Instructor.create() exercises the real password hashing hook.
 
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';

@@ -53,8 +53,8 @@ Create the `server/.env` file.
 
 ```ini
 PORT=4000
-MONGO_URI=mongodb://tasks:pass1234@ac-j3acrgb-shard-00-00.lueesfz.mongodb.net:27017,ac-j3acrgb-shard-00-01.lueesfz.mongodb.net:27017,ac-j3acrgb-shard-00-02.lueesfz.mongodb.net:27017/?ssl=true&replicaSet=atlas-6to6iy-shard-0&authSource=admin&appName=Cluster0
-JWT_SECRET=4a498d90a0f923ae4b3f1f65571ff25985d17e2f3286e8e90383e449f68a40a8
+MONGO_URI=mongodb://127.0.0.1:27017/course_reviews
+JWT_SECRET=replace-with-a-long-random-local-secret
 JWT_EXPIRES_IN=7d
 ```
 
@@ -114,3 +114,14 @@ Every attack from the `Flow.md` file works because the Instructor controller (`i
 Your solution should utilize the `express-mongo-sanitize` package and you are expected to know the difference between `Joi` and `express-mongo-sanitize` and think carefully about which properties should be public and which should be kept private.
 
 </details>
+
+## Task 5.1 implementation verification
+
+Use Node.js >=22.12.0. Keep real database credentials and JWT secrets only in the ignored `server/.env` file. The values above are local configuration examples.
+
+```bash
+npm test --workspace server
+npm run build --workspace client
+```
+
+See [SECURITY_REPORT.md](SECURITY_REPORT.md) for security changes, test results, Postman checks, and the explicit legacy-password migration procedure. Do not run migration or seeding against a shared database without the database owner's authorization.

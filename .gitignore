@@ -8,6 +8,9 @@ dist/
 
 # Environment variables
 .env
+.env.*
+!.env.example
+.npm-cache/
 
 
 # Log files

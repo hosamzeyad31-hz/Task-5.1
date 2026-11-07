@@ -1,6 +1,9 @@
 {
   "name": "task-3-coursereviews",
   "private": true,
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "workspaces": [
     "server",
     "client"

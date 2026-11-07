@@ -7,8 +7,7 @@ import {
 
 const router = Router();
 
-// The Instructor Portal has its own (naive, vulnerable) login — it does NOT use
-// the JWT requireAuth middleware. That is intentional for the lab.
+// The portal returns a public profile; student JWT authentication is separate.
 router.post('/login', loginInstructor);
 router.get('/', getDirectory);
 router.get('/search', searchInstructors);

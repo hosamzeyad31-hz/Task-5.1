@@ -1,210 +1,161 @@
-// =============================================================================
-//  Instructor Portal — NoSQL injection test suite
-// =============================================================================
-//
-// One suite, two outcomes:
-//   - Against Task-5.1-solution  -> everything is GREEN (all four attacks are
-//     blocked and legitimate behavior still works).
-//   - Against the vulnerable Task-5.1 -> the four "Attack" blocks FAIL (the
-//     injections succeed / secrets leak), while the "Legitimate behavior" block
-//     stays green.
-//
-// The assertions check the SECURITY PROPERTY ("not logged in", "no secret field
-// leaked", "no true/false oracle"), not the exact wording/status of the model
-// solution, so any correct fix passes — not only this particular one.
-//
-// Each attack maps to a step in Flow.md.
-
-import { jest } from '@jest/globals';
+import { test, describe, before, after, afterEach, mock } from 'node:test';
+import assert from 'node:assert/strict';
 import request from 'supertest';
-import mongoose from 'mongoose';
-
+import bcrypt from 'bcryptjs';
 import app from '../src/app.js';
 import { Instructor } from '../src/models/Instructor.js';
-import {
-  startDb,
-  stopDb,
-  seed,
-  SECRET_FIELDS,
-  ADMIN_PASSWORD
-} from './helpers/testEnv.js';
-
-jest.setTimeout(120000); // first run may download the mongod binary
+import { rejectMongoOperators } from '../src/middleware/mongoInput.js';
+import { migrateInstructorPasswords } from '../src/seed/migrateInstructorPasswords.js';
+import { startDb, stopDb, seed, SECRET_FIELDS, ADMIN_PASSWORD } from './helpers/testEnv.js';
 
 const api = request(app);
+before(async () => { await startDb(); await seed(); });
+after(stopDb);
+afterEach(() => mock.restoreAll());
 
-// True if `obj` exposes any of the secret fields with a non-empty value.
-function leaksSecret(obj) {
-  return SECRET_FIELDS.some(
-    (f) => obj != null && obj[f] !== undefined && obj[f] !== null
-  );
+function expectPublic(profile) {
+  for (const field of SECRET_FIELDS) assert.equal(Object.hasOwn(profile, field), false);
 }
 
-beforeAll(startDb);
-afterAll(stopDb);
-beforeEach(seed);
-
-// ---------------------------------------------------------------------------
-// Attack 1 — Authentication bypass  (Flow.md §2)
-// Sending operators instead of string credentials must NOT log anyone in.
-// ---------------------------------------------------------------------------
-describe('Attack 1: authentication bypass via operator injection', () => {
-  test('{$ne:null}/{$ne:null} does not authenticate', async () => {
-    const res = await api
-      .post('/api/instructors/login')
-      .send({ username: { $ne: null }, password: { $ne: null } });
-
-    expect(res.status).not.toBe(200);
-    expect([400, 401]).toContain(res.status);
-    expect(res.body.instructor).toBeUndefined();
+describe('Instructor credentials and public profiles', () => {
+  test('valid admin login returns the public profile only', async () => {
+    const res = await api.post('/api/instructors/login').send({ username: 'admin', password: ADMIN_PASSWORD });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.instructor.username, 'admin');
+    assert.equal(res.body.instructor.role, 'superadmin');
+    expectPublic(res.body.instructor);
   });
-
-  test('{$gt:""}/{$gt:""} does not authenticate', async () => {
-    const res = await api
-      .post('/api/instructors/login')
-      .send({ username: { $gt: '' }, password: { $gt: '' } });
-
-    expect(res.status).not.toBe(200);
-    expect([400, 401]).toContain(res.status);
-    expect(res.body.instructor).toBeUndefined();
+  test('dotted username remains valid', async () => {
+    const res = await api.post('/api/instructors/login').send({ username: 'prof.smith', password: 'password123' });
+    assert.equal(res.status, 200);
+    expectPublic(res.body.instructor);
   });
-});
-
-// ---------------------------------------------------------------------------
-// Attack 2 — Leak hidden data via operator injection on /search  (Flow.md §3)
-// ?role[$ne]=instructor must not return secret fields for any account.
-// ---------------------------------------------------------------------------
-describe('Attack 2: operator injection on /search leaks secrets', () => {
-  test('?role[$ne]=instructor returns no secret fields', async () => {
-    const res = await api
-      .get('/api/instructors/search')
-      .query({ 'role[$ne]': 'instructor' });
-
-    expect(res.status).toBe(200);
-    const instructors = res.body.instructors || [];
-    const leaked = instructors.filter(leaksSecret);
-    expect(leaked).toEqual([]);
+  ['wrong', 'missing-user'].forEach((kind, index) => test('invalid credentials fail case ' + index, async () => {
+    const res = await api.post('/api/instructors/login').send({
+      username: kind === 'missing-user' ? 'unknown' : 'admin', password: 'wrong'
+    });
+    assert.equal(res.status, 401);
+    assert.deepEqual(res.body, { message: 'Invalid credentials' });
+  }));
+  [
+    {}, [], { username: 'admin' }, { password: 'wrong' },
+    { username: {}, password: 'wrong' }, { username: [], password: 'wrong' },
+    { username: 'admin', password: [] }, { username: 'admin', password: {} },
+    { username: 42, password: 'wrong' }, { username: 'admin', password: 42 },
+    { username: 'admin', password: 'wrong', extra: true },
+    { username: '', password: 'wrong' }, { username: 'admin', password: '' },
+    { username: 'admin', password: 'a'.repeat(73) },
+    { username: { $ne: null }, password: { $ne: null } },
+    { username: { $gt: '' }, password: { $gt: '' } },
+    { username: 'admin', password: { $regex: '^S' } },
+    { username: { $where: 'true' }, password: 'wrong' },
+    { username: 'admin', password: 'wrong', nested: [{ $ne: null }] }
+  ].forEach((body, index) => test('malformed credentials are rejected before lookup case ' + index, async () => {
+    const lookup = mock.method(Instructor, 'findOne');
+    const res = await api.post('/api/instructors/login').send(body);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.instructor, undefined);
+    assert.equal(lookup.mock.callCount(), 0);
+  }));
+  test('no password-prefix oracle', async () => {
+    const responses = [];
+    for (const prefix of ['^S', '^X']) {
+      const res = await api.post('/api/instructors/login').send({ username: 'admin', password: { $regex: prefix } });
+      assert.equal(res.status, 400);
+      responses.push(res.body);
+    }
+    assert.deepEqual(responses[0], responses[1]);
   });
-
-  test('?username[$regex]=^admin returns no secret fields', async () => {
-    const res = await api
-      .get('/api/instructors/search')
-      .query({ 'username[$regex]': '^admin' });
-
-    expect(res.status).toBe(200);
-    const instructors = res.body.instructors || [];
-    expect(instructors.filter(leaksSecret)).toEqual([]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Attack 3 — Blind password extraction via $regex oracle  (Flow.md §4)
-// A $regex password must (a) never log in and (b) not reveal whether the guess
-// was right (same response for a right vs wrong prefix => no oracle). The stored
-// password must also not be plaintext.
-// ---------------------------------------------------------------------------
-describe('Attack 3: $regex blind-extraction oracle', () => {
-  test('a $regex password object never authenticates', async () => {
-    const res = await api
-      .post('/api/instructors/login')
-      .send({ username: 'admin', password: { $regex: '^S' } });
-
-    expect(res.status).not.toBe(200);
-    expect(res.body.instructor).toBeUndefined();
-  });
-
-  test('right vs wrong regex prefix are indistinguishable (no oracle)', async () => {
-    const right = await api
-      .post('/api/instructors/login')
-      .send({ username: 'admin', password: { $regex: '^S' } }); // matches S3cr3t...
-    const wrong = await api
-      .post('/api/instructors/login')
-      .send({ username: 'admin', password: { $regex: '^X' } }); // matches nothing
-
-    expect(right.status).not.toBe(200);
-    expect(wrong.status).not.toBe(200);
-    // The attacker learns one bit per guess only if these differ.
-    expect(right.status).toBe(wrong.status);
-  });
-
-  test('admin password is not stored in plaintext', async () => {
-    const admin = await Instructor.findOne({ username: 'admin' }).select('+password');
-    expect(admin).toBeTruthy();
-    expect(admin.password).toBeDefined();
-    expect(admin.password).not.toBe(ADMIN_PASSWORD);
+  test('malformed JSON fails safely', async () => {
+    const res = await api.post('/api/instructors/login').set('Content-Type', 'application/json').send('{');
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.body, { message: 'Invalid request' });
   });
 });
 
-// ---------------------------------------------------------------------------
-// Attack 4 — Server-side JavaScript execution via $where  (Flow.md §5)
-// $where injected through /search must not run as code nor leak secret fields.
-// (mongodb-memory-server runs a local mongod that DOES allow $where, so on the
-// vulnerable app this genuinely executes and leaks — which is what fails here.)
-// ---------------------------------------------------------------------------
-describe('Attack 4: $where server-side JavaScript injection', () => {
-  test('?$where=this.password.length>10 leaks no secrets', async () => {
-    const res = await api
-      .get('/api/instructors/search')
-      .query({ $where: 'this.password.length > 10' });
-
-    expect(res.status).toBe(200);
-    const instructors = res.body.instructors || [];
-    expect(instructors.filter(leaksSecret)).toEqual([]);
+describe('Search, directory, and operator rejection', () => {
+  test('sanitization supports a read-only query property without changing input', () => {
+    const query = { name: 'Smith' };
+    const req = { body: { username: 'prof.smith', password: 'literal$ne.value' }, params: {} };
+    Object.defineProperty(req, 'query', { get: () => query });
+    let continued = false;
+    rejectMongoOperators(req, {}, () => { continued = true; });
+    assert.equal(continued, true);
+    assert.deepEqual(req.query, { name: 'Smith' });
+    assert.equal(req.body.password, 'literal$ne.value');
   });
-
-  test("?$where=apiKey.indexOf('sk_live') leaks no secrets", async () => {
-    const res = await api
-      .get('/api/instructors/search')
-      .query({ $where: "this.apiKey && this.apiKey.indexOf('sk_live') === 0" });
-
-    expect(res.status).toBe(200);
-    const instructors = res.body.instructors || [];
-    expect(instructors.filter(leaksSecret)).toEqual([]);
-  });
+  [
+    { 'role[$ne]': 'instructor' }, { 'username[$regex]': '^admin' },
+    { $where: 'this.password.length>10' },
+    { $where: "this.apiKey && this.apiKey.indexOf('sk_live')===0" },
+    { 'name[$gt]': '' }, { 'name[$regex]': '.*' },
+    { password: 'guess' }, { apiKey: 'guess' }, { privateEmail: 'guess' },
+    { role: 'superadmin' }, { username: 'admin' }, { unexpected: 'x' },
+    { 'name[]': 'Smith' }, { 'name.value': 'Smith' },
+    { name: ['Smith', 'Jones'] }, { 'name[$where]': 'true' }
+  ].forEach((query, index) => test('rejects filters before database execution case ' + index, async () => {
+    const lookup = mock.method(Instructor, 'find');
+    const res = await api.get('/api/instructors/search').query(query);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.instructors, undefined);
+    assert.equal(lookup.mock.callCount(), 0);
+  }));
+  ['Smith', 'smith', 'Prof. Alice Smith'].forEach((name, index) => test('literal name search works case ' + index, async () => {
+    const res = await api.get('/api/instructors/search').query({ name });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.count, 1);
+    assert.equal(res.body.instructors[0].name, 'Prof. Alice Smith');
+    expectPublic(res.body.instructors[0]);
+  }));
+  ['.*', '^', '$where', '(a+)+$'].forEach((name, index) => test('regex syntax is literal data case ' + index, async () => {
+    const res = await api.get('/api/instructors/search').query({ name });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.count, 0);
+  }));
+  ['/api/instructors', '/api/instructors/search', '/api/instructors/search?name='].forEach((url, index) => test('public endpoint exposes no secrets case ' + index, async () => {
+    const res = await api.get(url);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.instructors.length, 4);
+    res.body.instructors.forEach(expectPublic);
+  }));
 });
 
-// ---------------------------------------------------------------------------
-// Legitimate behavior — must keep working after the fix. These pass on BOTH the
-// vulnerable and the solution projects (the fix must not break normal use).
-// ---------------------------------------------------------------------------
-describe('Legitimate behavior is preserved', () => {
-  test('honest login with the correct password succeeds', async () => {
-    const res = await api
-      .post('/api/instructors/login')
-      .send({ username: 'admin', password: ADMIN_PASSWORD });
-
-    expect(res.status).toBe(200);
-    expect(res.body.instructor).toBeDefined();
-    expect(res.body.instructor.role).toBe('superadmin');
+describe('Password storage and migration', () => {
+  test('database contains a verifiable hash; defaults and serialization hide secrets', async () => {
+    const admin = await Instructor.findOne({ username: 'admin' }).select('+password +apiKey +privateEmail +privatePhone');
+    assert.equal(await bcrypt.compare(ADMIN_PASSWORD, admin.password), true);
+    expectPublic(admin.toJSON());
+    expectPublic(admin.toObject());
+    expectPublic((await Instructor.findOne({ username: 'admin' }).lean()));
+    const original = admin.password;
+    await admin.save();
+    assert.equal((await Instructor.findById(admin._id).select('+password')).password, original);
   });
-
-  test('honest login with a wrong password is rejected', async () => {
-    const res = await api
-      .post('/api/instructors/login')
-      .send({ username: 'admin', password: 'definitely-wrong' });
-
-    expect(res.status).toBe(401);
-    expect(res.body.instructor).toBeUndefined();
+  test('password changes hash once, including insertMany', async () => {
+    const [doc] = await Instructor.insertMany([{ name: 'Test', username: 'test-hashing', password: 'original' }]);
+    assert.equal(await doc.comparePassword('original'), true);
+    doc.password = 'changed';
+    await doc.save();
+    assert.equal(await doc.comparePassword('changed'), true);
+    assert.equal(await doc.comparePassword('original'), false);
+    await doc.deleteOne();
   });
-
-  test('public directory returns only safe fields', async () => {
-    const res = await api.get('/api/instructors');
-
-    expect(res.status).toBe(200);
-    const instructors = res.body.instructors || [];
-    expect(instructors.length).toBeGreaterThan(0);
-    expect(instructors.filter(leaksSecret)).toEqual([]);
+  test('query password updates cannot skip save hashing', async () => {
+    await assert.rejects(Instructor.updateOne({ username: 'admin' }, { $set: { password: 'plaintext' } }), /Use document.save()/);
   });
-
-  test('honest search by name finds the matching instructor', async () => {
-    // Full name is used so this is green on both versions (the vulnerable
-    // search does an exact match; the solution does a case-insensitive contains).
-    const res = await api
-      .get('/api/instructors/search')
-      .query({ name: 'Prof. Alice Smith' });
-
-    expect(res.status).toBe(200);
-    const names = (res.body.instructors || []).map((i) => i.name);
-    expect(names).toContain('Prof. Alice Smith');
+  test('migration is read-only by default, preserves accounts and hashes, and is repeatable', async () => {
+    // Raw collection access deliberately simulates a legacy database record.
+    const { insertedId } = await Instructor.collection.insertOne({ name: 'Legacy', username: 'legacy', password: 'legacy-password', role: 'instructor' });
+    const before = await Instructor.findOne({ username: 'admin' }).select('+password');
+    assert.deepEqual(await migrateInstructorPasswords(), { pending: 1, migrated: 0, unsupported: 0 });
+    assert.equal((await Instructor.collection.findOne({ _id: insertedId })).password, 'legacy-password');
+    const denied = await api.post('/api/instructors/login').send({ username: 'legacy', password: 'legacy-password' });
+    assert.equal(denied.status, 401);
+    assert.deepEqual(await migrateInstructorPasswords({ apply: true }), { pending: 1, migrated: 1, unsupported: 0 });
+    const accepted = await api.post('/api/instructors/login').send({ username: 'legacy', password: 'legacy-password' });
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(await migrateInstructorPasswords({ apply: true }), { pending: 0, migrated: 0, unsupported: 0 });
+    assert.equal((await Instructor.findById(before._id).select('+password')).password, before.password);
+    await Instructor.collection.deleteOne({ _id: insertedId });
   });
 });
